@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>إدارة مشاوير صيدليات السقا</title>
+<style>
+body { font-family: Arial, sans-serif; margin:0; background:#f4f6f9; color:#222; }
+header { background:#007bff; color:white; padding:10px; text-align:center; font-size:20px; position:relative; }
+#date { font-size:14px; margin-top:5px; opacity:.9 }
+.container { padding:15px; max-width:900px; margin:0 auto; }
+input { display:block; width:100%; padding:10px; margin:6px 0; font-size:16px; border-radius:8px; border:1px solid #ccc; }
+.btn { padding:10px 15px; border:none; border-radius:8px; cursor:pointer; font-size:15px; }
+.btn:disabled { opacity:.6; cursor:not-allowed; }
+.btn-start { background:#28a745; color:white; }
+.btn-end { background:#dc3545; color:white; }
+.btn-cancel { background:#ffc107; color:#000; }
+.btn-danger { background:#ff4d4d; color:#fff; }
+.btn-group { display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 6px; }
+.trip-card { background:white; padding:10px 12px; margin:8px 0; border-radius:10px; box-shadow:0 2px 5px rgba(0,0,0,0.08); font-size:14px; display:flex; gap:10px; align-items:center; position:relative; transition:background .25s,border .25s; }
+.trip-card .content { flex:1; }
+.current { background:#e6f2ff; border:2px solid #007bff; }
+.hidden { display:none; }
+#toast{visibility:hidden; min-width:250px; background:#333; color:#fff; text-align:center; border-radius:8px; padding:12px; position:fixed; left:50%; bottom:30px; transform:translateX(-50%); font-size:16px; opacity:0; transition:opacity .4s,bottom .4s; z-index:1000}
+#toast.show{visibility:visible; opacity:1; bottom:50px}
+#splash { position:fixed; inset:0; background:white; display:flex; flex-direction:column; align-items:center; justify-content:center; font-size:22px; z-index:2000; }
+#splash img { width:84px; margin-bottom:14px; }
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:6px;vertical-align:middle}
+.online{background:#28a745}.offline{background:#dc3545}
+</style>
+</head>
+<body>
+
+<!-- Splash -->
+<div id="splash">
+  <img src="https://img.icons8.com/color/96/000000/pharmacy-shop.png" alt="logo"/>
+  <div>أهلًا بك في إدارة مشاوير صيدليات السقا</div>
+</div>
+
+<!-- Login -->
+<div id="loginScreen" class="container hidden">
+  <h3 style="text-align:center">تسجيل الدخول</h3>
+  <input type="email" id="loginEmail" placeholder="الإيميل">
+  <input type="password" id="loginPass" placeholder="كلمة السر">
+  <button id="loginBtn" class="btn btn-start" style="width:100%">دخول</button>
+</div>
+
+<!-- App -->
+<div id="app" class="hidden">
+  <header>
+    إدارة مشاوير صيدليات السقا
+    <div id="date"></div>
+    <div style="position:absolute;top:10px;left:10px;font-size:12px">
+      <span id="netDot" class="status-dot offline"></span><span id="netText">أوفلاين</span>
+    </div>
+    <button id="logoutBtn" class="btn btn-danger" style="position:absolute;right:10px;top:10px">خروج</button>
+  </header>
+
+  <div class="container">
+    <input type="text" id="repName" placeholder="اسم المندوب" disabled>
+    <input type="text" id="destination" placeholder="الوجهة">
+
+    <div class="btn-group">
+      <button id="startBtn" class="btn btn-start">بدء المشوار</button>
+      <button id="endBtn" class="btn btn-end">إنهاء المشوار</button>
+      <button id="cancelBtn" class="btn btn-cancel">إلغاء المشوار</button>
+    </div>
+
+    <h3 style="margin:12px 0 6px">المشوار الحالي</h3>
+    <div id="currentTrip"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js";
+import { getDatabase, ref, set, update, onValue } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-database.js";
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-auth.js";
+
+// Firebase
+const firebaseConfig = {
+  apiKey:"AIzaSyCuCRsXNu4hXJtS_rXZmaazbGEz8XhV4PI",
+  authDomain:"elsaka-data-pharmacy.firebaseapp.com",
+  databaseURL:"https://elsaka-data-pharmacy-default-rtdb.firebaseio.com/",
+  projectId:"elsaka-data-pharmacy",
+  storageBucket:"elsaka-data-pharmacy.firebasestorage.app",
+  messagingSenderId:"182478040389",
+  appId:"1:182478040389:web:20a314996f3a256043622c"
+};
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+const auth = getAuth(app);
+
+// Helpers
+const $ = s=>document.querySelector(s);
+const toast = m=>{ const t=$("#toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),3000); };
+const fmtTime = d => new Date(d).toLocaleTimeString("ar-EG");
+const durStr = s=>`${Math.floor(s/60)} دقيقة ${s%60} ثانية`;
+$("#date").textContent = `${new Date().getMonth()+1}/${new Date().getDate()}`;
+
+// Local
+let mirror={current:null}, timer=null, endInFlight=false;
+
+// Splash
+window.addEventListener("DOMContentLoaded",()=>{
+  setTimeout(()=>{ $("#splash").style.display="none"; checkAuth(); },1500);
+});
+
+// Network status
+function updateNetUI(){
+  const online = navigator.onLine;
+  $("#netDot").classList.toggle("online",online);
+  $("#netDot").classList.toggle("offline",!online);
+  $("#netText").textContent = online ? "أونلاين" : "أوفلاين";
+}
+window.addEventListener("online", updateNetUI);
+window.addEventListener("offline", updateNetUI);
+updateNetUI();
+
+// Auth
+function checkAuth(){
+  try{
+    onAuthStateChanged(auth,user=>{
+      if(user){
+        $("#loginScreen").classList.add("hidden");
+        $("#app").classList.remove("hidden");
+        $("#repName").value = user.email;
+        startListeners(user.uid);
+      } else {
+        $("#loginScreen").classList.remove("hidden");
+        $("#app").classList.add("hidden");
+      }
+    });
+  }catch(e){ console.error("Auth error",e); toast("خطأ في التحقق من المستخدم"); }
+}
+
+// Login
+$("#loginBtn").onclick=()=>{
+  const email=$("#loginEmail").value.trim();
+  const pass=$("#loginPass").value.trim();
+  if(!email||!pass){ alert("أدخل الإيميل وكلمة السر"); return; }
+  signInWithEmailAndPassword(auth,email,pass)
+    .then(()=>toast("✅ تم تسجيل الدخول"))
+    .catch(e=>alert("خطأ: "+e.message));
+}
+
+// Logout
+$("#logoutBtn").onclick = () => {
+  if(confirm("هل تريد تسجيل الخروج؟")){
+    signOut(auth).then(()=> { toast("✅ تم تسجيل الخروج"); location.reload(); })
+    .catch(e=>alert("خطأ أثناء تسجيل الخروج: "+e.message));
+  }
+}
+
+// Database listener
+function startListeners(uid){
+  onValue(ref(db,"currentTrip"), snap=>{
+    const val = snap.val();
+    mirror.current = (val && val.delegateUid===uid)?val:null;
+    renderCurrent();
+  });
+}
+
+// Render current trip
+function renderCurrent(){
+  const host=$("#currentTrip"); host.innerHTML=""; if(timer){ clearInterval(timer); timer=null; }
+  if(!mirror.current) return;
+  const start=new Date(mirror.current.startTime);
+  const card=document.createElement("div"); card.className="trip-card current";
+  card.innerHTML=`<div class="content">
+    <div><strong>${mirror.current.delegateName}</strong> — ${mirror.current.destination}</div>
+    <div>⏱️ البداية: ${fmtTime(start)}</div>
+    <div id="currentDuration">المدة: 0 دقيقة 0 ثانية</div>
+  </div>`; host.appendChild(card);
+  timer=setInterval(()=>{
+    const s=Math.floor((Date.now()-new Date(mirror.current.startTime).getTime())/1000);
+    const el=$("#currentDuration"); if(el) el.textContent=`المدة: ${durStr(s)}`;
+  },1000);
+}
+
+// Start trip
+$("#startBtn").onclick = async ()=>{
+  if(!confirm("هل تريد بدء المشوار؟")) return;
+  const dest=$("#destination").value.trim();
+  if(!dest){ alert("أدخل الوجهة"); return; }
+  if(mirror.current){ alert("هناك مشوار جاري بالفعل"); return; }
+  const user = auth.currentUser;
+  const payload={ currentId:Date.now(), delegateName:user.email, delegateUid:user.uid, destination:dest, startTime:new Date().toISOString() };
+  await set(ref(db,"currentTrip"),payload);
+  $("#destination").value="";
+  toast("✅ تم بدء المشوار");
+};
+
+// End trip
+$("#endBtn").onclick = async ()=>{
+  if(!mirror.current){ alert("لا يوجد مشوار جاري"); return; }
+  if(endInFlight) return;
+  if(!confirm("هل تريد إنهاء المشوار؟")) return;
+  endInFlight=true; $("#endBtn").disabled=true;
+  try{
+    const updates={};
+    const tripId = mirror.current.currentId;
+    updates[`/trips/${tripId}`]={...mirror.current, endTime:new Date().toISOString()};
+    updates["/currentTrip"]=null;
+    await update(ref(db),updates);
+    toast("🏁 تم إنهاء المشوار");
+  }finally{ endInFlight=false; $("#endBtn").disabled=false; }
+};
+
+// Cancel trip
+$("#cancelBtn").onclick = async ()=>{
+  if(!mirror.current){ alert("لا يوجد مشوار جاري"); return; }
+  if(!confirm("هل تريد إلغاء المشوار؟")) return;
+  await set(ref(db,"currentTrip"),null);
+  toast("❌ تم إلغاء المشوار");
+};
+</script>
+</body>
+</html>
